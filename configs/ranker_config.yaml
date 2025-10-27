@@ -1,0 +1,23 @@
+# Attribute Ranker Training Configuration
+
+model:
+  embedding_dim: 192
+  attributes:
+    - age
+    - gender
+    - pitch
+    - voice_quality
+  hidden_dims: [256, 128]
+  dropout: 0.3
+
+training:
+  epochs: 50
+  batch_size: 128
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  pairs_per_sample: 5
+
+data:
+  embeddings_path: "data/train_embeddings.pt"
+  metadata_path: "data/train_metadata.csv"
+  num_workers: 4

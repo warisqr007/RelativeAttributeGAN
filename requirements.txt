@@ -1,0 +1,13 @@
+torch 
+torchvision 
+torchaudio
+pytorch-lightning
+speechbrain
+librosa
+soundfile
+scikit-learn
+scipy
+wandb
+torchmetrics
+omegaconf
+pyyaml
