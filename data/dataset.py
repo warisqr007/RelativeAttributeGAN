@@ -98,23 +98,33 @@ class PairwiseRankingDataset(Dataset):
             # print(np.array(attr_values).shape)
             # print(len(candidates_greater), len(candidates_less))
             # print(len(candidates_greater[0]), len(candidates_less[0]))
-
-            
-            # Sample random pairs
-            for _ in range(self.num_pairs):
-                if len(candidates_greater) > 0 and len(candidates_less) > 0:
-                    # Randomly choose whether i should be greater or less
-                    if np.random.rand() > 0.5 and len(candidates_greater) > 0:
+            # since gender is binary, we can only form pairs between the two classes
+            if self.attribute == 'gender':
+                for _ in range(self.num_pairs):
+                    if len(candidates_greater) > 0:
                         j = np.random.choice(candidates_greater)
                         label = -1  # j > i
-                    elif len(candidates_less) > 0:
+                        pairs.append((i, j, label))
+                    if len(candidates_less) > 0:
                         j = np.random.choice(candidates_less)
                         label = 1  # i > j
-                    else:
-                        continue
-                    
-                    pairs.append((i, j, label))
-        
+                        pairs.append((i, j, label))
+            else:
+                # Sample random pairs
+                for _ in range(self.num_pairs):
+                    if len(candidates_greater) > 0 and len(candidates_less) > 0:
+                        # Randomly choose whether i should be greater or less
+                        if np.random.rand() > 0.5 and len(candidates_greater) > 0:
+                            j = np.random.choice(candidates_greater)
+                            label = -1  # j > i
+                        elif len(candidates_less) > 0:
+                            j = np.random.choice(candidates_less)
+                            label = 1  # i > j
+                        else:
+                            continue
+                        
+                        pairs.append((i, j, label))
+
         return pairs
     
     def __len__(self):

@@ -44,6 +44,7 @@ class CombinedGANLoss(nn.Module):
         lambda_dist=1.0,
         lambda_smooth=0.1,
         lambda_ranker=0.5,  # NEW: Weight for ranker-based loss
+        lambda_gmm_prior=0.5,  # NEW: Weight for GMM prior loss
         use_wasserstein=False
     ):
         super().__init__()
@@ -51,6 +52,7 @@ class CombinedGANLoss(nn.Module):
         self.lambda_dist = lambda_dist
         self.lambda_smooth = lambda_smooth
         self.lambda_ranker = lambda_ranker  # NEW
+        self.lambda_gmm_prior = lambda_gmm_prior  # NEW
         self.use_wasserstein = use_wasserstein
     
     def adversarial_loss(self, fake_logits):
@@ -172,6 +174,11 @@ class CombinedGANLoss(nn.Module):
         
         return variance
     
+    def gmm_prior_loss(self, transformed_embeddings, gmm_prior):
+        nll = gmm_prior.nll(transformed_embeddings)
+        loss = nll.mean()
+        return loss
+    
     def forward(
         self,
         fake_logits,
@@ -182,6 +189,7 @@ class CombinedGANLoss(nn.Module):
         lambda_anon,
         attribute_rankers=None,  # NEW: Pass rankers here
         attributes=None,  # NEW: List of attribute names
+        gmm_prior=None,  # NEW: GMM prior model
         interpolated_embeddings=None
     ):
         """
@@ -220,6 +228,14 @@ class CombinedGANLoss(nn.Module):
         loss_smooth = 0.0
         if interpolated_embeddings is not None:
             loss_smooth = self.smoothness_loss(interpolated_embeddings)
+
+        loss_gmm = 0.0
+        if gmm_prior is not None:
+            loss_gmm = self.gmm_prior_loss(
+                transformed_embeddings,
+                gmm_prior
+            )
+
         
         # Total loss
         total_loss = (
@@ -227,7 +243,8 @@ class CombinedGANLoss(nn.Module):
             self.lambda_attr * loss_attr +
             self.lambda_ranker * loss_ranker +  # NEW
             self.lambda_dist * loss_dist +
-            self.lambda_smooth * loss_smooth
+            self.lambda_smooth * loss_smooth +
+            self.lambda_gmm_prior * loss_gmm  # NEW
         )
         
         # Return individual components for logging
@@ -237,7 +254,8 @@ class CombinedGANLoss(nn.Module):
             'attribute': loss_attr.item() if isinstance(loss_attr, torch.Tensor) else loss_attr,
             'ranker': loss_ranker.item() if isinstance(loss_ranker, torch.Tensor) else loss_ranker,  # NEW
             'distance': loss_dist.item(),
-            'smoothness': loss_smooth.item() if isinstance(loss_smooth, torch.Tensor) else loss_smooth
+            'smoothness': loss_smooth.item() if isinstance(loss_smooth, torch.Tensor) else loss_smooth,
+            'gmm_prior': loss_gmm.item() if isinstance(loss_gmm, torch.Tensor) else loss_gmm  # NEW
         }
 
 

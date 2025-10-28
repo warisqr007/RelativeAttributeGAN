@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 import numpy as np
 from models.attribute_ranker import MultiAttributeRanker, AttributeRanker
 from models.speaker_encoder import SpeakerEmbeddingExtractor
+from models.gmm import SpeakerEmbeddingGMM, GMMNLLPrior
 
 from data.dataset import (
     PairwiseRankingDataset,
@@ -107,10 +108,35 @@ def train_attribute_rankers(args):
 
 
 
-def train_gan(args):
-    """Phase 2-3: GAN training with progressive curriculum"""
+def train_gmm(args):
+    """Phase 2: GMM training for latent space modeling"""
     print("\n" + "="*60)
-    print("PHASE 2-3: Training GAN with Progressive Curriculum")
+    print("PHASE 2: Training GMM for Latent Space Modeling")
+    print("="*60)
+    
+    # Load data
+    # embeddings = torch.load(args.embeddings_path)
+    metadata = pd.read_csv(args.metadata_path)
+    embedding_paths = metadata['embedding_path'].values
+    train_embeddings = []
+    for path in embedding_paths:
+        emb = np.load(path)
+        emb_tensor = torch.from_numpy(emb)
+        train_embeddings.append(emb_tensor)
+    train_embeddings = torch.stack(train_embeddings)
+    
+    gmm = SpeakerEmbeddingGMM(n_components=64, embedding_dim=train_embeddings.size(1), covariance_type="diag")
+    gmm.fit(train_embeddings)
+    gmm.save("checkpoints/gmm/gmm_params.ckpt")
+    
+    print("\n✓ Phase 2 Complete: GMM training finished")
+
+
+
+def train_gan(args):
+    """Phase 3: GAN training with progressive curriculum"""
+    print("\n" + "="*60)
+    print("PHASE 3: Training GAN with Progressive Curriculum")
     print("="*60)
     
     # Load data
@@ -155,7 +181,8 @@ def train_gan(args):
         lambda_dist=args.lambda_dist,
         lambda_smooth=args.lambda_smooth,
         lambda_ranker=args.lambda_ranker,  # NEW
-        ranker_checkpoint_dir='checkpoints/rankers'  # NEW: Load pretrained rankers
+        ranker_checkpoint_dir='checkpoints/rankers',  # NEW: Load pretrained rankers
+        gmm_checkpoint_path='checkpoints/gmm/gmm_params.ckpt'  # NEW: GMM path
     )
     
     # Callbacks
@@ -280,7 +307,7 @@ def main():
     parser = argparse.ArgumentParser()
     
     # General
-    parser.add_argument('--mode', type=str, choices=['ranker', 'gan', 'eval', 'all'],
+    parser.add_argument('--mode', type=str, choices=['ranker', 'gmm', 'gan', 'eval', 'all'],
                        default='all', help='Training mode')
     # parser.add_argument('--embeddings_path', type=str, required=True)
     parser.add_argument('--metadata_path', type=str, default='/data/waris/data/Voxceleb/voxceleb1/final_metadata_train.csv')
@@ -319,6 +346,9 @@ def main():
     # Execute requested mode
     if args.mode in ['ranker', 'all']:
         train_attribute_rankers(args)
+
+    if args.mode in ['gmm', 'all']:
+        train_gmm(args)
     
     if args.mode in ['gan', 'all']:
         train_gan(args)

@@ -4,6 +4,7 @@ from models.generator import AttributeControlGenerator
 from models.discriminator import MultiTaskDiscriminator
 from models.attribute_ranker import MultiAttributeRanker
 from models.losses import CombinedGANLoss, DiscriminatorLoss
+from models.gmm import GMMNLLPrior
 
 
 class RelativeAttributeGAN(pl.LightningModule):
@@ -25,7 +26,10 @@ class RelativeAttributeGAN(pl.LightningModule):
         lambda_dist=1.0,
         lambda_smooth=0.1,
         lambda_ranker=0.5,  # NEW: Weight for ranker loss
+        lambda_gmm_prior=0.5,  # NEW
         ranker_checkpoint_dir=None,  # NEW: Path to pretrained rankers
+        gmm_checkpoint_path=None,
+        gmm_num_components=64,
         curriculum_schedule=None,
         d_steps_per_g_step=2
     ):
@@ -57,6 +61,11 @@ class RelativeAttributeGAN(pl.LightningModule):
         
         if ranker_checkpoint_dir:
             self._load_rankers(ranker_checkpoint_dir, attributes)
+
+        
+        self.gmm_prior = GMMNLLPrior(embedding_dim=embedding_dim, num_components=gmm_num_components)
+        if gmm_checkpoint_path:
+            self._load_gmm(gmm_checkpoint_path)
         
         # Freeze rankers - they provide supervisory signal only
         for param in self.attribute_rankers.parameters():
@@ -68,7 +77,8 @@ class RelativeAttributeGAN(pl.LightningModule):
             lambda_attr=lambda_attr,
             lambda_dist=lambda_dist,
             lambda_smooth=lambda_smooth,
-            lambda_ranker=lambda_ranker  # NEW
+            lambda_ranker=lambda_ranker,  # NEW
+            lambda_gmm_prior=lambda_gmm_prior  # NEW
         )
         
         self.d_loss_fn = DiscriminatorLoss()
@@ -97,6 +107,18 @@ class RelativeAttributeGAN(pl.LightningModule):
             else:
                 print(f"⚠ Warning: Ranker checkpoint not found for {attr} at {checkpoint_path}")
     
+    def _load_gmm(self, checkpoint_path):
+        ckpt = torch.load(checkpoint_path, map_location="cpu")
+        assert self.gmm_prior.num_components == ckpt["pi"].numel(), \
+            "GMM component count mismatch."
+        assert self.gmm_prior.emb_dim == ckpt["mu"].size(1), \
+            "GMM embedding dimension mismatch."
+        
+        with torch.no_grad():
+            self.gmm_prior.load_gmm(ckpt["pi"], ckpt["mu"], ckpt["var"])
+
+        print(f"✓ Loaded GMM prior from {checkpoint_path}")
+
     def _default_curriculum(self):
         """Default progressive training schedule"""
         return {
@@ -161,6 +183,7 @@ class RelativeAttributeGAN(pl.LightningModule):
         self.g_loss_fn.lambda_ranker = phase_config.get('lambda_ranker', 0.0)  # NEW
         self.g_loss_fn.lambda_dist = phase_config['lambda_dist']
         self.g_loss_fn.lambda_smooth = phase_config['lambda_smooth']
+        self.g_loss_fn.lambda_gmm_prior = phase_config.get('lambda_gmm_prior', 0.5)
         
         # Unpack batch
         real_embeddings = batch['embedding']
@@ -234,6 +257,7 @@ class RelativeAttributeGAN(pl.LightningModule):
             lambda_anon=lambda_anon,
             attribute_rankers=self.attribute_rankers,  # NEW: Pass rankers
             attributes=self.hparams.attributes,  # NEW: Pass attribute names
+            gmm_prior=self.gmm_prior,  # NEW: Pass GMM prior
             interpolated_embeddings=None  # Can add for smoothness loss
         )
         
@@ -251,6 +275,7 @@ class RelativeAttributeGAN(pl.LightningModule):
         self.log('g_loss_attr', g_loss_dict['attribute'], prog_bar=False, batch_size=batch_size)
         self.log('g_loss_ranker', g_loss_dict['ranker'], prog_bar=True, batch_size=batch_size)  # NEW
         self.log('g_loss_dist', g_loss_dict['distance'], prog_bar=False, batch_size=batch_size)
+        self.log('g_gmm_prior', g_loss_dict['gmm_prior'], prog_bar=False, batch_size=batch_size)  # NEW
         self.log('phase', float(phase_name[-1]), prog_bar=True, batch_size=batch_size)
         
         # Monitor discriminator accuracy (should stay around 70-80%)
