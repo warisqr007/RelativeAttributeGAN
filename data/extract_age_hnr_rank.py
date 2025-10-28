@@ -223,12 +223,12 @@ def extract_attributes_rank(
         return
     
     # Load existing metadata if it exists
-    if os.path.exists(metadata_csv):
-        print(f"Loading existing metadata from {metadata_csv}")
-        metadata = pd.read_csv(metadata_csv)
-    else:
-        print(f"Creating new metadata file")
-        metadata = pd.DataFrame()
+    # if os.path.exists(metadata_csv):
+    #     print(f"Loading existing metadata from {metadata_csv}")
+    #     metadata = pd.read_csv(metadata_csv)
+    # else:
+    print(f"Creating new metadata file")
+    metadata = pd.DataFrame()
     
     # Initialize audeering age predictor
     # age_predictor = None
@@ -331,9 +331,16 @@ def extract_attributes_rank(
                     lambda x: Path(x).stem if pd.notna(x) else None
                 )
     
-    # Save updated metadata
-    metadata.to_csv(metadata_csv, index=False)
-    print(f"\n✓ Saved metadata to {metadata_csv}")
+    if world_size > 1:
+        print(f"[rank {rank}] Finished processing {len(shard)} files.")
+        # Save updated metadata
+        ranked_metadata_csv = metadata_csv.replace('.csv', f'_rank{rank}.csv')
+        metadata.to_csv(ranked_metadata_csv, index=False)
+        print(f"[rank {rank}] ✓ Saved metadata to {ranked_metadata_csv}")
+    else:
+        # Save updated metadata
+        metadata.to_csv(metadata_csv, index=False)
+        print(f"\n✓ Saved metadata to {metadata_csv}")
     
     # Print statistics
     print("\n" + "-"*70)
@@ -342,7 +349,10 @@ def extract_attributes_rank(
     
     if compute_hnr and 'hnr' in metadata.columns:
         hnr_valid = metadata['hnr'].dropna()
-        print(f"HNR: {len(hnr_valid)}/{len(metadata)} valid")
+        if world_size > 1:
+            print(f"[rank {rank}] HNR: {len(hnr_valid)}/{len(metadata)} valid")
+        else:
+            print(f"HNR: {len(hnr_valid)}/{len(metadata)} valid")
         if len(hnr_valid) > 0:
             print(f"  Mean: {hnr_valid.mean():.2f} dB")
             print(f"  Std:  {hnr_valid.std():.2f} dB")
@@ -350,7 +360,10 @@ def extract_attributes_rank(
     
     if compute_f0 and 'mean_f0' in metadata.columns:
         f0_valid = metadata['mean_f0'].dropna()
-        print(f"\nMean F0: {len(f0_valid)}/{len(metadata)} valid")
+        if world_size > 1:
+            print(f"[rank {rank}] Mean F0: {len(f0_valid)}/{len(metadata)} valid")
+        else:
+            print(f"\nMean F0: {len(f0_valid)}/{len(metadata)} valid")
         if len(f0_valid) > 0:
             print(f"  Mean: {f0_valid.mean():.2f} Hz")
             print(f"  Std:  {f0_valid.std():.2f} Hz")
@@ -358,7 +371,10 @@ def extract_attributes_rank(
     
     if use_audeering_age and 'predicted_age' in metadata.columns:
         age_valid = metadata['predicted_age'].dropna()
-        print(f"\nPredicted Age: {len(age_valid)}/{len(metadata)} valid")
+        if world_size > 1:
+            print(f"[rank {rank}] Predicted Age: {len(age_valid)}/{len(metadata)} valid")
+        else:
+            print(f"\nPredicted Age: {len(age_valid)}/{len(metadata)} valid")
         if len(age_valid) > 0:
             print(f"  Mean: {age_valid.mean():.2f} years")
             print(f"  Std:  {age_valid.std():.2f} years")

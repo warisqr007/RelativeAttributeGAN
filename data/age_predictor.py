@@ -106,7 +106,7 @@ class AudeeringAgePredictor:
         self.model.to(self.device)
         self.model.eval()
         
-        self.gender_labels = ['child', 'female', 'male']
+        self.gender_labels = ['female', 'male', 'child'] #['child', 'female', 'male']
         
         print("✓ Model loaded successfully!")
     
@@ -126,7 +126,7 @@ class AudeeringAgePredictor:
             
         Returns:
             age: Predicted age in years (0-100)
-            gender: Predicted gender ('child', 'female', 'male')
+            gender: Predicted gender ('female', 'male', 'child')
             confidence: Confidence for gender prediction (0-1)
             embeddings: (optional) wav2vec2 embeddings if return_embeddings=True
         """

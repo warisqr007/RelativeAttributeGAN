@@ -4,7 +4,7 @@ Frozen pre-trained speaker embedding extractor using ECAPA-TDNN
 import torch
 import torch.nn as nn
 from speechbrain.lobes.models.ECAPA_TDNN import ECAPA_TDNN
-from speechbrain.processing.features import Fbank
+from speechbrain.processing.features import Filterbank
 
 
 class SpeakerEmbeddingExtractor(nn.Module):
@@ -23,7 +23,7 @@ class SpeakerEmbeddingExtractor(nn.Module):
         self.device = device
         
         # Feature extraction
-        self.fbank = Fbank(n_mels=80)
+        self.fbank = Filterbank(n_mels=80)
         
         # ECAPA-TDNN architecture
         self.encoder = ECAPA_TDNN(

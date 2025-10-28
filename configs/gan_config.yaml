@@ -1,7 +1,7 @@
 # GAN Training Configuration
 
 model:
-  embedding_dim: 192
+  embedding_dim: 704
   num_attributes: 4
   generator:
     hidden_dim: 512
@@ -50,5 +50,5 @@ curriculum:
 
 data:
   embeddings_path: "data/train_embeddings.pt"
-  metadata_path: "data/train_metadata.csv"
+  metadata_path: "/data/waris/data/Voxceleb/voxceleb1/final_metadata_train.csv"
   num_workers: 4

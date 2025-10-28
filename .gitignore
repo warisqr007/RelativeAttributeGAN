@@ -180,3 +180,5 @@ ckpts/*.pt
 logs/*
 dummy*
 results*
+checkpoints/*
+wandb/*

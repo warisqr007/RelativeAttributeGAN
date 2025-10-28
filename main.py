@@ -6,15 +6,19 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import WandbLogger
 import argparse
+import pandas as pd
+from torch.utils.data import DataLoader
+import numpy as np
+from models.attribute_ranker import MultiAttributeRanker, AttributeRanker
+from models.speaker_encoder import SpeakerEmbeddingExtractor
 
 from data.dataset import (
-    SpeakerEmbeddingDataset,
     PairwiseRankingDataset,
     GANTrainingDataset
 )
-from training.ranker_trainer import AttributeRankerTrainer
+from training.ranker_trainer import SingleAttributeRankerTrainer
 from training.gan_trainer import RelativeAttributeGAN
-from evaluation.evaluator import GANEvaluator
+from evaluation.evaluator  import GANEvaluator
 
 
 def train_attribute_rankers(args):
@@ -24,19 +28,21 @@ def train_attribute_rankers(args):
     print("="*60)
     
     # Load data
-    embeddings = torch.load(args.embeddings_path)
+    # embeddings = torch.load(args.embeddings_path)
     metadata = pd.read_csv(args.metadata_path)
     
     # Create datasets for each attribute
     for attribute in args.attributes:
-        print(f"\nTraining ranker for attribute: {attribute}")
+        print(f"\n{'='*60}")
+        print(f"Training ranker for attribute: {attribute}")
+        print(f"{'='*60}")
         
         dataset = PairwiseRankingDataset(
-            embeddings, metadata, attribute,
+            metadata, attribute,
             num_pairs_per_sample=args.pairs_per_sample
         )
         
-        train_size = int(0.8 * len(dataset))
+        train_size = int(0.9 * len(dataset))
         val_size = len(dataset) - train_size
         train_dataset, val_dataset = torch.utils.data.random_split(
             dataset, [train_size, val_size]
@@ -54,10 +60,17 @@ def train_attribute_rankers(args):
             num_workers=args.num_workers
         )
         
-        # Create model
-        model = AttributeRankerTrainer(
+        # # Create model
+        # model = AttributeRankerTrainer(
+        #     embedding_dim=args.embedding_dim,
+        #     attributes=[attribute],
+        #     learning_rate=args.ranker_lr
+        # )
+
+        # Create model for THIS attribute
+        model = SingleAttributeRankerTrainer(
+            attribute_name=attribute,
             embedding_dim=args.embedding_dim,
-            attributes=[attribute],
             learning_rate=args.ranker_lr
         )
         
@@ -65,13 +78,13 @@ def train_attribute_rankers(args):
         checkpoint = ModelCheckpoint(
             dirpath=f'checkpoints/rankers/{attribute}',
             filename='best',
-            monitor=f'val_loss_{attribute}',
+            monitor=f'val_loss',
             mode='min',
             save_top_k=1
         )
         
         early_stop = EarlyStopping(
-            monitor=f'val_loss_{attribute}',
+            monitor=f'val_loss',
             patience=10,
             mode='min'
         )
@@ -101,12 +114,12 @@ def train_gan(args):
     print("="*60)
     
     # Load data
-    embeddings = torch.load(args.embeddings_path)
+    # embeddings = torch.load(args.embeddings_path)
     metadata = pd.read_csv(args.metadata_path)
     
     # Create dataset
     dataset = GANTrainingDataset(
-        embeddings, metadata,
+        metadata,
         attributes=args.attributes
     )
     
@@ -175,13 +188,14 @@ def train_gan(args):
 
 
 def evaluate(args):
-    """Phase 4: Comprehensive evaluation"""
+    """Phase 4: Comprehensive evaluation - CORRECTED VERSION"""
     print("\n" + "="*60)
     print("PHASE 4: Evaluation")
     print("="*60)
     
     # Load trained models
     gan = RelativeAttributeGAN.load_from_checkpoint(args.gan_checkpoint)
+    gan.eval()
     
     # Load attribute rankers
     rankers = MultiAttributeRanker(
@@ -190,14 +204,29 @@ def evaluate(args):
     )
     for attr in args.attributes:
         ranker_ckpt = torch.load(f'checkpoints/rankers/{attr}/best.ckpt')
-        rankers.rankers[attr].load_state_dict(ranker_ckpt['state_dict'])
+        # Extract ranker state dict from Lightning checkpoint
+        state_dict = {}
+        for key, value in ranker_ckpt['state_dict'].items():
+            if key.startswith(f'ranker.{attr}'):
+                new_key = key.replace(f'ranker.{attr}.', '')
+                state_dict[new_key] = value
+        rankers.rankers[attr].load_state_dict(state_dict, strict=False)
     
-    # Load speaker encoder
-    encoder = SpeakerEmbeddingExtractor(pretrained_path=args.encoder_path)
+    # Load speaker encoder (optional but useful for analysis)
+    encoder = None
+    # if args.encoder_path:
+    #     encoder = SpeakerEmbeddingExtractor(pretrained_path=args.encoder_path)
     
     # Load test data
-    test_embeddings = torch.load(args.test_embeddings_path)
+    # test_embeddings = torch.load(args.test_embeddings_path)
     test_metadata = pd.read_csv(args.test_metadata_path)
+    embedding_paths = test_metadata['embedding_path'].values
+    test_embeddings = []
+    for path in embedding_paths:
+        emb = np.load(path)
+        emb_tensor = torch.from_numpy(emb)
+        test_embeddings.append(emb_tensor)
+    test_embeddings = torch.stack(test_embeddings)
     
     # Create evaluator
     evaluator = GANEvaluator(
@@ -208,24 +237,40 @@ def evaluate(args):
     )
     
     # Run evaluation
-    results = evaluator.evaluate_all(test_embeddings, test_metadata)
+    lambda_values = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    results = evaluator.evaluate_all(
+        test_embeddings,
+        test_metadata,
+        lambda_values=lambda_values
+    )
     
     # Print results
-    print("\n" + "-"*60)
-    print("EVALUATION RESULTS")
-    print("-"*60)
+    evaluator.print_results(results)
     
-    print("\nAnonymization Effectiveness (EER):")
-    for key, value in results['anonymization'].items():
-        print(f"  {key}: {value['eer']:.4f} (threshold: {value['threshold']:.4f})")
+    # Save results
+    import json
+    results_path = 'evaluation_results.json'
     
-    print("\nRanking Accuracy:")
-    for key, value in results.items():
-        if key.startswith('ranking_acc'):
-            print(f"  {key}: {value:.4f}")
+    # Convert numpy types to native Python for JSON serialization
+    def convert_to_serializable(obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {k: convert_to_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_to_serializable(item) for item in obj]
+        return obj
     
-    print(f"\nGeneration Quality: {results['generation_quality']:.4f}")
+    results_serializable = convert_to_serializable(results)
     
+    with open(results_path, 'w') as f:
+        json.dump(results_serializable, f, indent=2)
+    
+    print(f"\n✓ Results saved to {results_path}")
     print("\n✓ Evaluation Complete")
     
     return results
@@ -237,14 +282,14 @@ def main():
     # General
     parser.add_argument('--mode', type=str, choices=['ranker', 'gan', 'eval', 'all'],
                        default='all', help='Training mode')
-    parser.add_argument('--embeddings_path', type=str, required=True)
-    parser.add_argument('--metadata_path', type=str, required=True)
-    parser.add_argument('--test_embeddings_path', type=str)
-    parser.add_argument('--test_metadata_path', type=str)
-    parser.add_argument('--encoder_path', type=str, help='Pretrained speaker encoder')
+    # parser.add_argument('--embeddings_path', type=str, required=True)
+    parser.add_argument('--metadata_path', type=str, default='/data/waris/data/Voxceleb/voxceleb1/final_metadata_train.csv')
+    # parser.add_argument('--test_embeddings_path', type=str)
+    parser.add_argument('--test_metadata_path', type=str, default='/data/waris/data/Voxceleb/voxceleb1/final_metadata_test.csv')
+    # parser.add_argument('--encoder_path', type=str, help='Pretrained speaker encoder')
     
     # Data
-    parser.add_argument('--embedding_dim', type=int, default=192)
+    parser.add_argument('--embedding_dim', type=int, default=704)
     parser.add_argument('--attributes', nargs='+',
                        default=['age', 'gender', 'pitch', 'voice_quality'])
     parser.add_argument('--num_workers', type=int, default=4)
@@ -252,7 +297,7 @@ def main():
     # Ranker training
     parser.add_argument('--ranker_epochs', type=int, default=50)
     parser.add_argument('--ranker_lr', type=float, default=1e-3)
-    parser.add_argument('--pairs_per_sample', type=int, default=5)
+    parser.add_argument('--pairs_per_sample', type=int, default=15)
     parser.add_argument('--batch_size', type=int, default=128)
     
     # GAN training

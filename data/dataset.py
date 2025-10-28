@@ -58,7 +58,7 @@ class PairwiseRankingDataset(Dataset):
     """
     def __init__(
         self,
-        embeddings,
+        # embeddings,
         metadata,
         attribute,
         num_pairs_per_sample=5
@@ -70,7 +70,8 @@ class PairwiseRankingDataset(Dataset):
             attribute: String, which attribute to rank on
             num_pairs_per_sample: How many comparison pairs to generate per speaker
         """
-        self.embeddings = embeddings
+        # self.embeddings = embeddings
+        self.embeddings_fpaths = metadata['embedding_path'].values
         self.metadata = metadata
         self.attribute = attribute
         self.num_pairs = num_pairs_per_sample
@@ -81,7 +82,8 @@ class PairwiseRankingDataset(Dataset):
     def _generate_pairs(self):
         """Generate pairwise comparisons based on attribute values"""
         pairs = []
-        n = len(self.embeddings)
+        # n = len(self.embeddings)
+        n = len(self.metadata)
         
         # Get attribute values
         attr_values = self.metadata[self.attribute].values
@@ -89,8 +91,14 @@ class PairwiseRankingDataset(Dataset):
         # Generate pairs where we know the ranking
         for i in range(n):
             # Find speakers with different attribute values
-            candidates_greater = np.where(attr_values > attr_values[i])
-            candidates_less = np.where(attr_values < attr_values[i])
+            candidates_greater = np.where(attr_values > attr_values[i])[0]
+            candidates_less = np.where(attr_values < attr_values[i])[0]
+
+            # print(len(attr_values))
+            # print(np.array(attr_values).shape)
+            # print(len(candidates_greater), len(candidates_less))
+            # print(len(candidates_greater[0]), len(candidates_less[0]))
+
             
             # Sample random pairs
             for _ in range(self.num_pairs):
@@ -114,11 +122,19 @@ class PairwiseRankingDataset(Dataset):
     
     def __getitem__(self, idx):
         i, j, label = self.pairs[idx]
+
+        embed_fp_i = self.embeddings_fpaths[i]
+        embed_fp_j = self.embeddings_fpaths[j]
+
+        emb_i = np.load(embed_fp_i)
+        emb_j = np.load(embed_fp_j)
+
         
         return {
-            'emb_i': self.embeddings[i],
-            'emb_j': self.embeddings[j],
-            'label': torch.tensor(label, dtype=torch.float32)
+            'emb_i': torch.from_numpy(emb_i),
+            'emb_j': torch.from_numpy(emb_j),
+            'label': torch.tensor(label, dtype=torch.float32),
+            'attribute': self.attribute
         }
 
 
@@ -128,23 +144,25 @@ class GANTrainingDataset(Dataset):
     """
     def __init__(
         self,
-        embeddings,
+        # embeddings,
         metadata,
         attributes=['age', 'gender', 'pitch', 'voice_quality'],
         delta_range=(-1.0, 1.0),
         lambda_anon_range=(0.0, 1.0)
     ):
-        self.embeddings = embeddings
+        # self.embeddings = embeddings
+        self.embeddings_fpaths = metadata['embedding_path'].values
         self.metadata = metadata
         self.attributes = attributes
         self.delta_range = delta_range
         self.lambda_range = lambda_anon_range
     
     def __len__(self):
-        return len(self.embeddings)
+        return len(self.metadata)
     
     def __getitem__(self, idx):
-        embedding = self.embeddings[idx]
+        embedding = np.load(self.embeddings_fpaths[idx])
+        embedding = torch.from_numpy(embedding)
         
         # Sample random attribute deltas
         deltas = torch.FloatTensor(len(self.attributes)).uniform_(

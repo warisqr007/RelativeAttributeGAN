@@ -88,8 +88,8 @@ class RelativeAttributeGAN(pl.LightningModule):
                 # Extract ranker state dict from Lightning checkpoint
                 state_dict = {}
                 for key, value in checkpoint['state_dict'].items():
-                    if key.startswith(f'ranker.rankers.{attr}'):
-                        new_key = key.replace(f'ranker.rankers.{attr}.', '')
+                    if key.startswith(f'ranker.{attr}'):
+                        new_key = key.replace(f'ranker.{attr}.', '')
                         state_dict[new_key] = value
                 
                 self.attribute_rankers.rankers[attr].load_state_dict(state_dict, strict=False)
@@ -245,13 +245,13 @@ class RelativeAttributeGAN(pl.LightningModule):
         g_opt.step()
         
         # Logging
-        self.log('d_loss', d_loss, prog_bar=True)
-        self.log('g_loss_total', g_loss, prog_bar=True)
-        self.log('g_loss_adv', g_loss_dict['adversarial'], prog_bar=False)
-        self.log('g_loss_attr', g_loss_dict['attribute'], prog_bar=False)
-        self.log('g_loss_ranker', g_loss_dict['ranker'], prog_bar=True)  # NEW
-        self.log('g_loss_dist', g_loss_dict['distance'], prog_bar=False)
-        self.log('phase', float(phase_name[-1]), prog_bar=True)
+        self.log('d_loss', d_loss, prog_bar=True, batch_size=batch_size)
+        self.log('g_loss_total', g_loss, prog_bar=True, batch_size=batch_size)
+        self.log('g_loss_adv', g_loss_dict['adversarial'], prog_bar=False, batch_size=batch_size)
+        self.log('g_loss_attr', g_loss_dict['attribute'], prog_bar=False, batch_size=batch_size)
+        self.log('g_loss_ranker', g_loss_dict['ranker'], prog_bar=True, batch_size=batch_size)  # NEW
+        self.log('g_loss_dist', g_loss_dict['distance'], prog_bar=False, batch_size=batch_size)
+        self.log('phase', float(phase_name[-1]), prog_bar=True, batch_size=batch_size)
         
         # Monitor discriminator accuracy (should stay around 70-80%)
         with torch.no_grad():
@@ -259,7 +259,7 @@ class RelativeAttributeGAN(pl.LightningModule):
             fake_pred = (torch.sigmoid(fake_logits) < 0.5).float().mean()
             d_acc = (real_pred + fake_pred) / 2
         
-        self.log('d_accuracy', d_acc, prog_bar=True)
+        self.log('d_accuracy', d_acc, prog_bar=True, batch_size=batch_size)
     
     def validation_step(self, batch, batch_idx):
         """Validate generator quality"""
@@ -296,10 +296,10 @@ class RelativeAttributeGAN(pl.LightningModule):
             age_scores_transformed = self.attribute_rankers.score(fake_embeddings, 'age')
             avg_age_increase = (age_scores_transformed - age_scores_orig).mean()
         
-        self.log('val_fake_quality', torch.sigmoid(fake_logits).mean())
-        self.log('val_cos_similarity', cos_sim)
-        self.log('val_age_score_change', avg_age_increase)  # NEW
-    
+        self.log('val_fake_quality', torch.sigmoid(fake_logits).mean(), batch_size=batch_size)
+        self.log('val_cos_similarity', cos_sim, batch_size=batch_size)
+        self.log('val_age_score_change', avg_age_increase, batch_size=batch_size)  # NEW
+
     def configure_optimizers(self):
         """Separate optimizers for generator and discriminator"""
         g_opt = torch.optim.Adam(
