@@ -10,9 +10,11 @@ import argparse
 import pandas as pd
 from torch.utils.data import DataLoader
 import numpy as np
+from tqdm import tqdm
 from models.attribute_ranker import MultiAttributeRanker, AttributeRanker
 from models.speaker_encoder import SpeakerEmbeddingExtractor
 from models.gmm import SpeakerEmbeddingGMM, GMMNLLPrior
+from models.composite_directions import compute_composite_direction, orthogonalize_set, pca_components
 
 from data.dataset import (
     PairwiseRankingDataset,
@@ -135,6 +137,93 @@ def train_gmm(args):
     print("\n✓ Phase 2 Complete: GMM training finished")
 
 
+def train_pca(args):
+    """Phase 2.5: PCA and Composite Direction Computation"""
+    print("\n" + "="*60)
+    print("PHASE 2.5: PCA and Composite Direction Computation")
+    print("="*60)
+    
+    # Load data
+    metadata = pd.read_csv(args.metadata_path)
+    embedding_paths = metadata['embedding_path'].values
+    embs = []
+    for path in embedding_paths:
+        emb = np.load(path)
+        emb_tensor = torch.from_numpy(emb)
+        embs.append(emb_tensor)
+    embs = torch.stack(embs)  # [N, D]
+
+    ## calculate attribute scores using trained rankers
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    rankers = MultiAttributeRanker(
+        embedding_dim=args.embedding_dim,
+        attributes=args.attributes
+    )
+    for attr in args.attributes:
+        ranker_ckpt = torch.load(f'{args.checkpoint_dir}/rankers/{attr}/best.ckpt', map_location='cpu')
+        # Extract ranker state dict from Lightning checkpoint
+        state_dict = {}
+        for key, value in ranker_ckpt['state_dict'].items():
+            if key.startswith(f'ranker.{attr}'):
+                new_key = key.replace(f'ranker.{attr}.', '')
+                state_dict[new_key] = value
+        rankers.rankers[attr].load_state_dict(state_dict, strict=False)
+
+    rankers = rankers.to(device)
+    rankers.eval()
+
+    scores_matrix = torch.zeros((embs.size(0), len(args.attributes)), device=device)  # [N, num_attributes]
+
+    # Compute scores for each attribute in batches of 1024
+    with torch.no_grad():
+        batch_size = 1024
+        for start_idx in tqdm(range(0, embs.size(0), batch_size)):
+            end_idx = min(start_idx + batch_size, embs.size(0))
+            batch_embs = embs[start_idx:end_idx].to(device)
+            for i, attr in enumerate(args.attributes):
+                batch_scores = rankers.rankers[attr](batch_embs)
+                scores_matrix[start_idx:end_idx, i] = batch_scores.view(-1)
+    
+    # Compute PCA and composite directions
+    # scores_matrix = scores_matrix.cpu()
+    embs = embs.to(device)
+    Vh, S, Xc = pca_components(embs, k=256)
+    # Save
+    out = {
+        "topk": 256,
+        "Vh": Vh.cpu(),
+        "S": S.cpu(),
+    }
+    added_var = False
+    for i, attr in enumerate(args.attributes):
+        attr_scores = scores_matrix[:, i]
+        v_attr, corr_attr, var = compute_composite_direction(Xc, attr_scores, Vh, S)
+        out[f'v_{attr}_raw'] = v_attr.cpu()
+        out[f'corr_{attr}'] = corr_attr.cpu()
+        if not added_var:
+            added_var = True
+            out[f'pc_var'] = var.cpu()
+    
+    v_age_o, v_gen_o, v_pitch_o, v_vq_o = orthogonalize_set([out[f'v_{attr}_raw'] for attr in args.attributes])
+    for i, attr in enumerate(args.attributes):
+        out['v_age'] = v_age_o.cpu()
+        out['v_gender'] = v_gen_o.cpu()
+        out['v_pitch'] = v_pitch_o.cpu()
+        out['v_voice_quality'] = v_vq_o.cpu()
+
+    os.makedirs(f"{args.checkpoint_dir}/pca", exist_ok=True)
+    torch.save(out, f"{args.checkpoint_dir}/pca/composite_directions.ckpt")
+    print("\n✓ Phase 2.5 Complete: PCA and composite directions computed")
+
+    print(
+        "Saved directions to", f"{args.checkpoint_dir}/pca/composite_directions.ckpt",
+        f"||v_age||={v_age_o.norm():.3f}",
+        f"||v_gender||={v_gen_o.norm():.3f}",
+        f"||v_pitch||={v_pitch_o.norm():.3f}",
+        f"||v_voice_quality||={v_vq_o.norm():.3f}",
+    )
+
+
 
 def train_gan(args):
     """Phase 3: GAN training with progressive curriculum"""
@@ -185,7 +274,8 @@ def train_gan(args):
         lambda_smooth=args.lambda_smooth,
         lambda_ranker=args.lambda_ranker,  # NEW
         ranker_checkpoint_dir=f'{args.checkpoint_dir}/rankers',  # NEW: Load pretrained rankers
-        gmm_checkpoint_path=f'{args.checkpoint_dir}/gmm/gmm_params.ckpt'  # NEW: GMM path
+        gmm_checkpoint_path=f'{args.checkpoint_dir}/gmm/gmm_params.ckpt',  # NEW: GMM path
+        composite_directions_path=f'{args.checkpoint_dir}/pca/composite_directions.ckpt'  # NEW: PCA directions path
     )
     
     # Callbacks
@@ -318,7 +408,7 @@ def main():
     parser = argparse.ArgumentParser()
     
     # General
-    parser.add_argument('--mode', type=str, choices=['ranker', 'gmm', 'gan', 'eval', 'all'],
+    parser.add_argument('--mode', type=str, choices=['ranker', 'gmm', 'pca', 'gan', 'eval', 'all'],
                        default='all', help='Training mode')
     # parser.add_argument('--embeddings_path', type=str, required=True)
     parser.add_argument('--metadata_path', type=str, default='/data/waris/data/Voxceleb/voxceleb1/final_metadata_train.csv')
@@ -362,6 +452,9 @@ def main():
 
     if args.mode in ['gmm', 'all']:
         train_gmm(args)
+
+    if args.mode in ['pca', 'all']:
+        train_pca(args)
     
     if args.mode in ['gan', 'all']:
         train_gan(args)

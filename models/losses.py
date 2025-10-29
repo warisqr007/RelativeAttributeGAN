@@ -40,19 +40,25 @@ class CombinedGANLoss(nn.Module):
     """
     def __init__(
         self,
+        lambda_adv=1.0,
         lambda_attr=1.0,
         lambda_dist=1.0,
         lambda_smooth=0.1,
-        lambda_ranker=0.5,  # NEW: Weight for ranker-based loss
-        lambda_gmm_prior=0.5,  # NEW: Weight for GMM prior loss
+        lambda_ranker=0.5,
+        lambda_gmm_prior=0.1,
+        lambda_cycle=0.5,      # NEW
+        lambda_ortho=0.1,      # NEW
         use_wasserstein=False
     ):
         super().__init__()
+        self.lambda_adv = lambda_adv
         self.lambda_attr = lambda_attr
         self.lambda_dist = lambda_dist
         self.lambda_smooth = lambda_smooth
         self.lambda_ranker = lambda_ranker  # NEW
         self.lambda_gmm_prior = lambda_gmm_prior  # NEW
+        self.lambda_ortho = lambda_ortho  # NEW
+        self.lambda_cycle = lambda_cycle  # NEW
         self.use_wasserstein = use_wasserstein
     
     def adversarial_loss(self, fake_logits):
@@ -176,8 +182,62 @@ class CombinedGANLoss(nn.Module):
     
     def gmm_prior_loss(self, transformed_embeddings, gmm_prior):
         nll = gmm_prior.nll(transformed_embeddings)
-        loss = nll.mean()
+        nll_normalized = nll / transformed_embeddings.size(1)
+        loss = nll_normalized.mean()
         return loss
+    
+    def orthogonality_loss(self, generator, embeddings, deltas, lambda_anon):
+        """
+        Encourage orthogonality: ⟨∂e'/∂Δ_i, ∂e'/∂Δ_j⟩ ≈ 0 for i≠j
+        """
+        embeddings = embeddings.detach()
+        deltas = deltas.clone().requires_grad_(True)
+        
+        # Forward pass
+        e_transformed = generator(embeddings, deltas, lambda_anon)
+        
+        # Compute gradients w.r.t. deltas
+        grads = torch.autograd.grad(
+            e_transformed.sum(),  # Scalar output for backward
+            deltas,
+            create_graph=True,
+            retain_graph=True
+        )[0]  # Shape: (batch, num_attributes)
+        
+        # Compute pairwise dot products
+        # We want different attributes to be orthogonal
+        ortho_loss = 0.0
+        num_attrs = grads.shape[1]
+        
+        for i in range(num_attrs):
+            for j in range(i+1, num_attrs):
+                # Dot product between gradient of attr_i and attr_j
+                dot = (grads[:, i] * grads[:, j]).pow(2).mean()
+                ortho_loss += dot
+        
+        # Normalize by number of pairs
+        num_pairs = (num_attrs * (num_attrs - 1)) / 2
+        return ortho_loss / num_pairs if num_pairs > 0 else ortho_loss
+
+
+    def cycle_consistency_loss(self, generator, embeddings, deltas, lambda_anon):
+        """
+        Cycle: e -> G(e, Δ, λ) -> G(e', -Δ, λ*0.5) ≈ e
+        """
+        # Forward
+        e_transformed = generator(embeddings, deltas, lambda_anon)
+        
+        # Backward (reverse deltas, smaller lambda)
+        e_reconstructed = generator(
+            e_transformed.detach(),  # Stop gradients through first transform
+            -deltas,
+            lambda_anon * 0.5  # Smaller anonymization for reverse
+        )
+        
+        # Reconstruction loss
+        loss = F.mse_loss(e_reconstructed, embeddings)
+        return loss
+
     
     def forward(
         self,
@@ -187,28 +247,31 @@ class CombinedGANLoss(nn.Module):
         transformed_embeddings,
         original_embeddings,
         lambda_anon,
-        attribute_rankers=None,  # NEW: Pass rankers here
-        attributes=None,  # NEW: List of attribute names
-        gmm_prior=None,  # NEW: GMM prior model
+        attribute_rankers=None,
+        attributes=None,
+        gmm_prior=None,
+        generator=None,
         interpolated_embeddings=None
     ):
         """
         Compute combined generator loss.
         """
+        device = transformed_embeddings.device
+        
         # 1. Adversarial loss
-        loss_adv = self.adversarial_loss(fake_logits)
+        loss_adv = self.adversarial_loss(fake_logits) if self.lambda_adv > 0 else torch.tensor(0.0, device=device)
         
         # 2. Attribute matching loss (from discriminator)
         loss_attr = 0.0
-        if predicted_attr_deltas is not None:
+        if self.lambda_attr > 0 and predicted_attr_deltas is not None:
             loss_attr = self.attribute_matching_loss(
                 predicted_attr_deltas,
                 target_attr_deltas
             )
         
-        # 3. NEW: Ranker-based attribute loss (independent verification)
+        # 3. Ranker-based attribute loss
         loss_ranker = 0.0
-        if attribute_rankers is not None and attributes is not None:
+        if self.lambda_ranker > 0 and attribute_rankers is not None and attributes is not None:
             loss_ranker = self.ranker_based_attribute_loss(
                 attribute_rankers,
                 original_embeddings,
@@ -218,44 +281,67 @@ class CombinedGANLoss(nn.Module):
             )
         
         # 4. Distance control loss
-        loss_dist = self.distance_control_loss(
-            transformed_embeddings,
-            original_embeddings,
-            lambda_anon
-        )
-        
-        # 5. Smoothness loss (optional, only during later training stages)
-        loss_smooth = 0.0
-        if interpolated_embeddings is not None:
-            loss_smooth = self.smoothness_loss(interpolated_embeddings)
-
-        loss_gmm = 0.0
-        if gmm_prior is not None:
-            loss_gmm = self.gmm_prior_loss(
+        loss_dist = 0.0
+        if self.lambda_dist > 0:
+            loss_dist = self.distance_control_loss(
                 transformed_embeddings,
-                gmm_prior
+                original_embeddings,
+                lambda_anon
             )
-
+        
+        # 5. Smoothness loss
+        loss_smooth = 0.0
+        if self.lambda_smooth > 0 and interpolated_embeddings is not None:
+            loss_smooth = self.smoothness_loss(interpolated_embeddings)
+        
+        # 6. GMM prior loss (CORRECTED scaling)
+        loss_gmm = 0.0
+        if self.lambda_gmm_prior > 0 and gmm_prior is not None:
+            loss_gmm = self.gmm_prior_loss(transformed_embeddings, gmm_prior)
+        
+        # 7. NEW: Cycle consistency loss
+        loss_cycle = 0.0
+        if self.lambda_cycle > 0 and generator is not None:
+            loss_cycle = self.cycle_consistency_loss(
+                generator,
+                original_embeddings,
+                target_attr_deltas,
+                lambda_anon
+            )
+        
+        # 8. NEW: Orthogonality loss
+        loss_ortho = 0.0
+        if self.lambda_ortho > 0 and generator is not None:
+            loss_ortho = self.orthogonality_loss(
+                generator,
+                original_embeddings,
+                target_attr_deltas,
+                lambda_anon
+            )
         
         # Total loss
         total_loss = (
-            loss_adv +
+            self.lambda_adv * loss_adv +
             self.lambda_attr * loss_attr +
-            self.lambda_ranker * loss_ranker +  # NEW
+            self.lambda_ranker * loss_ranker +
             self.lambda_dist * loss_dist +
             self.lambda_smooth * loss_smooth +
-            self.lambda_gmm_prior * loss_gmm  # NEW
+            self.lambda_gmm_prior * loss_gmm +
+            self.lambda_cycle * loss_cycle +
+            self.lambda_ortho * loss_ortho
         )
         
         # Return individual components for logging
         return {
             'total': total_loss,
-            'adversarial': loss_adv.item(),
+            'adversarial': loss_adv.item() if isinstance(loss_adv, torch.Tensor) else loss_adv,
             'attribute': loss_attr.item() if isinstance(loss_attr, torch.Tensor) else loss_attr,
-            'ranker': loss_ranker.item() if isinstance(loss_ranker, torch.Tensor) else loss_ranker,  # NEW
-            'distance': loss_dist.item(),
+            'ranker': loss_ranker.item() if isinstance(loss_ranker, torch.Tensor) else loss_ranker,
+            'distance': loss_dist.item() if isinstance(loss_dist, torch.Tensor) else loss_dist,
             'smoothness': loss_smooth.item() if isinstance(loss_smooth, torch.Tensor) else loss_smooth,
-            'gmm_prior': loss_gmm.item() if isinstance(loss_gmm, torch.Tensor) else loss_gmm  # NEW
+            'gmm_prior': loss_gmm.item() if isinstance(loss_gmm, torch.Tensor) else loss_gmm,
+            'cycle': loss_cycle.item() if isinstance(loss_cycle, torch.Tensor) else loss_cycle,
+            'orthogonality': loss_ortho.item() if isinstance(loss_ortho, torch.Tensor) else loss_ortho
         }
 
 
@@ -305,7 +391,7 @@ class DiscriminatorLoss(nn.Module):
             grad_outputs=torch.ones_like(d_interpolates),
             create_graph=True,
             retain_graph=True
-        )
+        )[0]
         
         # Compute gradient penalty
         gradients = gradients.view(batch_size, -1)

@@ -3,7 +3,7 @@ Multi-task discriminator for GAN training
 """
 import torch
 import torch.nn as nn
-
+from torch.nn.utils import spectral_norm
 
 class MultiTaskDiscriminator(nn.Module):
     """
@@ -24,16 +24,19 @@ class MultiTaskDiscriminator(nn.Module):
         
         # Shared feature extractor
         self.shared = nn.Sequential(
-            nn.Linear(embedding_dim, hidden_dim),
+            spectral_norm(nn.Linear(embedding_dim, hidden_dim)),
+            # nn.Linear(embedding_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.LeakyReLU(0.2),
             nn.Dropout(dropout),
             
-            nn.Linear(hidden_dim, hidden_dim),
+            spectral_norm(nn.Linear(hidden_dim, hidden_dim)),
+            # nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.LeakyReLU(0.2),
             nn.Dropout(dropout),
             
+            # spectral_norm(nn.Linear(hidden_dim, hidden_dim // 2)),
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.LayerNorm(hidden_dim // 2),
             nn.LeakyReLU(0.2)
@@ -41,9 +44,11 @@ class MultiTaskDiscriminator(nn.Module):
         
         # Head 1: Real/Fake classification
         self.real_fake_head = nn.Sequential(
-            nn.Linear(hidden_dim // 2, 128),
+            spectral_norm(nn.Linear(hidden_dim // 2, 128)),
+            # nn.Linear(hidden_dim // 2, 128),
             nn.LeakyReLU(0.2),
-            nn.Linear(128, 1)  # No sigmoid - using BCEWithLogitsLoss
+            spectral_norm(nn.Linear(128, 1))
+            # nn.Linear(128, 1)  # No sigmoid - using BCEWithLogitsLoss
         )
         
         # Head 2: Attribute change verification

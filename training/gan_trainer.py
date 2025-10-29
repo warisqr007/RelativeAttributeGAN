@@ -1,6 +1,8 @@
 import torch
+import torch.nn.functional as F
 import pytorch_lightning as pl
-from models.generator import AttributeControlGenerator
+
+from models.generator import AttributeControlGenerator, HybridAttributeGenerator
 from models.discriminator import MultiTaskDiscriminator
 from models.attribute_ranker import MultiAttributeRanker
 from models.losses import CombinedGANLoss, DiscriminatorLoss
@@ -31,6 +33,7 @@ class RelativeAttributeGAN(pl.LightningModule):
         gmm_checkpoint_path=None,
         gmm_num_components=64,
         curriculum_schedule=None,
+        composite_directions_path=None,
         d_steps_per_g_step=2
     ):
         super().__init__()
@@ -40,12 +43,25 @@ class RelativeAttributeGAN(pl.LightningModule):
         self.automatic_optimization = False
         
         # Models
-        self.generator = AttributeControlGenerator(
+        # self.generator = AttributeControlGenerator(
+        #     embedding_dim=embedding_dim,
+        #     num_attributes=num_attributes,
+        #     hidden_dim=generator_hidden_dim,
+        #     num_residual_blocks=num_residual_blocks,
+        #     composite_directions_path=composite_directions_path
+        # )
+        self.generator = HybridAttributeGenerator(
             embedding_dim=embedding_dim,
             num_attributes=num_attributes,
-            hidden_dim=generator_hidden_dim,
-            num_residual_blocks=num_residual_blocks
+            # num_resblocks=num_residual_blocks,
+            attribute_names=attributes,
+            use_pca_directions=True
         )
+        assert composite_directions_path is not None, \
+            "Composite directions path must be provided for HybridAttributeGenerator."
+        if composite_directions_path:
+            direction_dict = torch.load(composite_directions_path)
+            self.generator.load_precomputed_directions(direction_dict)
         
         self.discriminator = MultiTaskDiscriminator(
             embedding_dim=embedding_dim,
@@ -81,7 +97,7 @@ class RelativeAttributeGAN(pl.LightningModule):
             lambda_gmm_prior=lambda_gmm_prior  # NEW
         )
         
-        self.d_loss_fn = DiscriminatorLoss()
+        self.d_loss_fn = DiscriminatorLoss(use_wasserstein=True)
         
         # Progressive training curriculum
         self.curriculum = curriculum_schedule or self._default_curriculum()
@@ -120,37 +136,94 @@ class RelativeAttributeGAN(pl.LightningModule):
         print(f"✓ Loaded GMM prior from {checkpoint_path}")
 
     def _default_curriculum(self):
-        """Default progressive training schedule"""
+        """
+        CORRECTED: Progressive training schedule with all parameters aligned.
+        
+        Philosophy:
+        - Warmup: Train G alone to learn basic transformations
+        - Stage1: Introduce adversarial training with weak losses
+        - Stage2: Add attribute control with rankers
+        - Stage3: Full training with all losses
+        """
         return {
-            'phase1': {  # Epochs 0-20: Learn basic transformations
-                'epochs': 20,
-                'lambda_attr': 0.0,  # No attribute matching yet
-                'lambda_ranker': 0.0,  # NEW: No ranker loss yet
-                'lambda_dist': 1.0,
-                'lambda_smooth': 0.0,
-                'delta_range': (-0.3, 0.3),  # Small changes
-                'lambda_anon_range': (0.0, 0.3)
+            'warmup': {  # Epochs 0-5: G only, no adversarial
+                'epochs': 5,
+                'train_discriminator': False,  # Freeze D completely
+                
+                # Loss weights
+                'lambda_adv': 0.0,        # No adversarial yet
+                'lambda_attr': 0.0,       # No discriminator attr loss
+                'lambda_ranker': 0.0,     # No ranker loss yet
+                'lambda_dist': 1.0,       # Focus on distance control
+                'lambda_smooth': 0.0,     # No smoothness yet
+                'lambda_cycle': 0.5,      # Cycle consistency
+                'lambda_ortho': 0.1,      # Weak orthogonality
+                'lambda_gmm_prior': 0.01, # Very weak GMM (scaled!)
+                
+                # Sampling ranges
+                'delta_range': (-0.2, 0.2),      # Small attribute changes
+                'lambda_anon_range': (0.0, 0.2)  # Small anonymization
             },
-            'phase2': {  # Epochs 20-50: Add attribute control
+            
+            'stage1': {  # Epochs 5-20: Introduce adversarial
+                'epochs': 15,
+                'train_discriminator': True,   # Start training D
+                
+                # Loss weights
+                'lambda_adv': 0.5,        # Weak adversarial
+                'lambda_attr': 0.3,       # Weak discriminator attr loss
+                'lambda_ranker': 0.0,     # Still no ranker
+                'lambda_dist': 1.0,       # Keep distance control strong
+                'lambda_smooth': 0.0,     # No smoothness yet
+                'lambda_cycle': 0.5,      # Keep cycle
+                'lambda_ortho': 0.1,      # Keep orthogonality
+                'lambda_gmm_prior': 0.05, # Increase GMM slightly (scaled!)
+                
+                # Sampling ranges
+                'delta_range': (-0.5, 0.5),      # Medium attribute changes
+                'lambda_anon_range': (0.0, 0.5)  # Medium anonymization
+            },
+            
+            'stage2': {  # Epochs 20-50: Add attribute control
                 'epochs': 30,
-                'lambda_attr': 0.5,
-                'lambda_ranker': 0.3,  # NEW: Start using ranker loss
-                'lambda_dist': 1.0,
-                'lambda_smooth': 0.0,
-                'delta_range': (-0.6, 0.6),
-                'lambda_anon_range': (0.0, 0.6)
+                'train_discriminator': True,
+                
+                # Loss weights
+                'lambda_adv': 1.0,        # Full adversarial
+                'lambda_attr': 0.5,       # Medium discriminator attr loss
+                'lambda_ranker': 0.3,     # Start using rankers
+                'lambda_dist': 1.0,       # Keep distance control
+                'lambda_smooth': 0.0,     # Still no smoothness
+                'lambda_cycle': 0.5,      # Keep cycle
+                'lambda_ortho': 0.1,      # Keep orthogonality
+                'lambda_gmm_prior': 0.1,  # Increase GMM (scaled!)
+                
+                # Sampling ranges
+                'delta_range': (-0.8, 0.8),      # Large attribute changes
+                'lambda_anon_range': (0.0, 0.8)  # Large anonymization
             },
-            'phase3': {  # Epochs 50+: Full training with smoothness
+            
+            'stage3': {  # Epochs 50+: Full training
                 'epochs': 50,
-                'lambda_attr': 1.0,
-                'lambda_ranker': 0.5,  # NEW: Full ranker loss
-                'lambda_dist': 1.0,
-                'lambda_smooth': 0.1,
-                'delta_range': (-1.0, 1.0),
-                'lambda_anon_range': (0.0, 1.0)
+                'train_discriminator': True,
+                
+                # Loss weights
+                'lambda_adv': 1.0,        # Full adversarial
+                'lambda_attr': 1.0,       # Full discriminator attr loss
+                'lambda_ranker': 0.5,     # Full ranker loss
+                'lambda_dist': 1.0,       # Keep distance control
+                'lambda_smooth': 0.1,     # Add smoothness
+                'lambda_cycle': 0.5,      # Keep cycle
+                'lambda_ortho': 0.1,      # Keep orthogonality
+                'lambda_gmm_prior': 0.1,  # Keep GMM (scaled!)
+                
+                # Sampling ranges
+                'delta_range': (-1.0, 1.0),      # Full range attribute changes
+                'lambda_anon_range': (0.0, 1.0)  # Full anonymization
             }
         }
-    
+
+
     def get_current_phase(self):
         """Determine which curriculum phase we're in"""
         epoch = self.current_epoch
@@ -162,7 +235,7 @@ class RelativeAttributeGAN(pl.LightningModule):
                 return phase_name, phase_config
         
         # If beyond all phases, use last phase config
-        return 'phase3', self.curriculum['phase3']
+        return 'stage3', self.curriculum['stage3']
     
     def forward(self, embeddings, attribute_deltas, lambda_anon):
         """Generate transformed embeddings"""
@@ -179,11 +252,14 @@ class RelativeAttributeGAN(pl.LightningModule):
         phase_name, phase_config = self.get_current_phase()
         
         # Update loss weights based on curriculum
-        self.g_loss_fn.lambda_attr = phase_config['lambda_attr']
-        self.g_loss_fn.lambda_ranker = phase_config.get('lambda_ranker', 0.0)  # NEW
-        self.g_loss_fn.lambda_dist = phase_config['lambda_dist']
-        self.g_loss_fn.lambda_smooth = phase_config['lambda_smooth']
-        self.g_loss_fn.lambda_gmm_prior = phase_config.get('lambda_gmm_prior', 0.5)
+        self.g_loss_fn.lambda_adv = phase_config.get('lambda_adv', 1.0)
+        self.g_loss_fn.lambda_attr = phase_config.get('lambda_attr', 0.0)
+        self.g_loss_fn.lambda_ranker = phase_config.get('lambda_ranker', 0.0)
+        self.g_loss_fn.lambda_dist = phase_config.get('lambda_dist', 1.0)
+        self.g_loss_fn.lambda_smooth = phase_config.get('lambda_smooth', 0.0)
+        self.g_loss_fn.lambda_cycle = phase_config.get('lambda_cycle', 0.0)
+        self.g_loss_fn.lambda_ortho = phase_config.get('lambda_ortho', 0.0)
+        self.g_loss_fn.lambda_gmm_prior = phase_config.get('lambda_gmm_prior', 0.0)
         
         # Unpack batch
         real_embeddings = batch['embedding']
@@ -204,30 +280,73 @@ class RelativeAttributeGAN(pl.LightningModule):
         ##########################
         # (1) Update Discriminator
         ##########################
-        for _ in range(self.hparams.d_steps_per_g_step):
-            d_opt.zero_grad()
+        if phase_config.get('train_discriminator', True):
+            for _ in range(self.hparams.d_steps_per_g_step):
+                d_opt.zero_grad()
+                
+                # Generate fake embeddings
+                fake_embeddings = self.generator(
+                    real_embeddings,
+                    attribute_deltas,
+                    lambda_anon
+                )
+                
+                # Discriminator predictions
+                real_logits, _ = self.discriminator(real_embeddings)
+                fake_logits, _ = self.discriminator(fake_embeddings.detach())
+                
+                # Discriminator loss
+                d_loss_rf = self.d_loss_fn(real_logits, fake_logits)
+
+                # Add gradient penalty
+                if self.d_loss_fn.use_wasserstein:
+                    gp = self.d_loss_fn.gradient_penalty(
+                        self.discriminator,
+                        real_embeddings,
+                        fake_embeddings.detach()
+                    )
+                    d_loss_rf = d_loss_rf + gp  # Add GP to loss
+
+                # Use fake embeddings WITH labels for attribute verification
+                _, predicted_attr_deltas = self.discriminator(
+                    fake_embeddings.detach(),
+                    original_embeddings=real_embeddings
+                )
+                
+                # Loss: predicted attribute changes should match actual deltas
+                d_loss_attr = F.mse_loss(predicted_attr_deltas, attribute_deltas)
+
+                # Total discriminator loss
+                attr_weight = phase_config.get('lambda_attr', 0.0)
+                d_loss = d_loss_rf + attr_weight * d_loss_attr
+
+                # Backward and optimize
+                self.manual_backward(d_loss)
+                
+                # Gradient clipping for stability
+                torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), 1.0)
+                
+                d_opt.step()
+
+            # Log discriminator metrics
+            self.log('d_loss_rf', d_loss_rf, prog_bar=False, batch_size=batch_size)
+            self.log('d_loss_attr', d_loss_attr, prog_bar=False, batch_size=batch_size)
+            self.log('d_loss_total', d_loss, prog_bar=True, batch_size=batch_size)
             
-            # Generate fake embeddings
-            fake_embeddings = self.generator(
-                real_embeddings,
-                attribute_deltas,
-                lambda_anon
-            )
+            # Monitor discriminator accuracy
+            with torch.no_grad():
+                real_pred = (torch.sigmoid(real_logits) > 0.5).float().mean()
+                fake_pred = (torch.sigmoid(fake_logits) < 0.5).float().mean()
+                d_acc = (real_pred + fake_pred) / 2
             
-            # Discriminator predictions
-            real_logits, _ = self.discriminator(real_embeddings)
-            fake_logits, _ = self.discriminator(fake_embeddings.detach())
-            
-            # Discriminator loss
-            d_loss = self.d_loss_fn(real_logits, fake_logits)
-            
-            # Backward and optimize
-            self.manual_backward(d_loss)
-            
-            # Gradient clipping for stability
-            torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), 1.0)
-            
-            d_opt.step()
+            self.log('d_accuracy', d_acc, prog_bar=True, batch_size=batch_size)
+        
+        else:
+            # Warmup phase: D not training, create dummy variables for logging
+            d_loss = torch.tensor(0.0, device=self.device)
+            d_acc = torch.tensor(0.0, device=self.device)
+            self.log('d_loss_total', d_loss, prog_bar=True, batch_size=batch_size)
+            self.log('d_accuracy', d_acc, prog_bar=True, batch_size=batch_size)
         
         ######################
         # (2) Update Generator
@@ -248,6 +367,18 @@ class RelativeAttributeGAN(pl.LightningModule):
         )
         
         # Generator loss (all components, INCLUDING ranker-based loss)
+        # g_loss_dict = self.g_loss_fn(
+        #     fake_logits=fake_logits,
+        #     predicted_attr_deltas=predicted_attr_deltas,
+        #     target_attr_deltas=attribute_deltas,
+        #     transformed_embeddings=fake_embeddings,
+        #     original_embeddings=real_embeddings,
+        #     lambda_anon=lambda_anon,
+        #     attribute_rankers=self.attribute_rankers,  # NEW: Pass rankers
+        #     attributes=self.hparams.attributes,  # NEW: Pass attribute names
+        #     gmm_prior=self.gmm_prior,  # NEW: Pass GMM prior
+        #     interpolated_embeddings=None  # Can add for smoothness loss
+        # )
         g_loss_dict = self.g_loss_fn(
             fake_logits=fake_logits,
             predicted_attr_deltas=predicted_attr_deltas,
@@ -255,10 +386,11 @@ class RelativeAttributeGAN(pl.LightningModule):
             transformed_embeddings=fake_embeddings,
             original_embeddings=real_embeddings,
             lambda_anon=lambda_anon,
-            attribute_rankers=self.attribute_rankers,  # NEW: Pass rankers
-            attributes=self.hparams.attributes,  # NEW: Pass attribute names
-            gmm_prior=self.gmm_prior,  # NEW: Pass GMM prior
-            interpolated_embeddings=None  # Can add for smoothness loss
+            attribute_rankers=self.attribute_rankers,  # Pass rankers
+            attributes=self.hparams.attributes,         # Pass attribute names
+            gmm_prior=self.gmm_prior,                   # Pass GMM prior
+            generator=self.generator,                   # NEW: Pass generator for cycle/ortho
+            interpolated_embeddings=None                # Can add for smoothness
         )
         
         g_loss = g_loss_dict['total']
@@ -268,24 +400,30 @@ class RelativeAttributeGAN(pl.LightningModule):
         torch.nn.utils.clip_grad_norm_(self.generator.parameters(), 1.0)
         g_opt.step()
         
-        # Logging
-        self.log('d_loss', d_loss, prog_bar=True, batch_size=batch_size)
         self.log('g_loss_total', g_loss, prog_bar=True, batch_size=batch_size)
         self.log('g_loss_adv', g_loss_dict['adversarial'], prog_bar=False, batch_size=batch_size)
         self.log('g_loss_attr', g_loss_dict['attribute'], prog_bar=False, batch_size=batch_size)
-        self.log('g_loss_ranker', g_loss_dict['ranker'], prog_bar=True, batch_size=batch_size)  # NEW
-        self.log('g_loss_dist', g_loss_dict['distance'], prog_bar=False, batch_size=batch_size)
-        self.log('g_gmm_prior', g_loss_dict['gmm_prior'], prog_bar=False, batch_size=batch_size)  # NEW
-        self.log('phase', float(phase_name[-1]), prog_bar=True, batch_size=batch_size)
+        self.log('g_loss_ranker', g_loss_dict['ranker'], prog_bar=False, batch_size=batch_size)
+        self.log('g_loss_dist', g_loss_dict['distance'], prog_bar=True, batch_size=batch_size)
+        self.log('g_loss_gmm', g_loss_dict['gmm_prior'], prog_bar=False, batch_size=batch_size)
+        self.log('g_loss_cycle', g_loss_dict.get('cycle', 0.0), prog_bar=False, batch_size=batch_size)
+        self.log('g_loss_ortho', g_loss_dict.get('orthogonality', 0.0), prog_bar=False, batch_size=batch_size)
         
-        # Monitor discriminator accuracy (should stay around 70-80%)
-        with torch.no_grad():
-            real_pred = (torch.sigmoid(real_logits) > 0.5).float().mean()
-            fake_pred = (torch.sigmoid(fake_logits) < 0.5).float().mean()
-            d_acc = (real_pred + fake_pred) / 2
+        # Log phase info
+        self.log('phase', float(phase_name.replace('warmup', '0').replace('stage', '')[-1]), prog_bar=True, batch_size=batch_size)
+        self.log('lambda_gmm_weight', self.g_loss_fn.lambda_gmm_prior, prog_bar=False, batch_size=batch_size)
         
-        self.log('d_accuracy', d_acc, prog_bar=True, batch_size=batch_size)
+        # Log curriculum sampling ranges (for debugging)
+        self.log('delta_range_max', delta_range[1], prog_bar=False, batch_size=batch_size)
+        self.log('lambda_anon_range_max', lambda_range[1], prog_bar=False, batch_size=batch_size)
     
+        if batch_idx % 100 == 0:
+            norms = self.generator.get_direction_norms()
+            for key, norm in norms.items():
+                self.log(f'gen_direction_{key}_norm', norm, prog_bar=False, batch_size=batch_size)
+            # Should see scales change slightly but stay close to 1.0
+        
+        
     def validation_step(self, batch, batch_idx):
         """Validate generator quality"""
         real_embeddings = batch['embedding']
