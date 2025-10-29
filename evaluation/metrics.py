@@ -258,7 +258,7 @@ def evaluate_attribute_preservation(
     for attr_idx, attr_name in enumerate(rankers.attributes):
         # Get ranker scores
         orig_scores = rankers.score(original_embeddings.to(device), attr_name).cpu()
-        anon_scores = rankers.score(anonymized.cpu(), attr_name).cpu()
+        anon_scores = rankers.score(anonymized.to(device), attr_name).cpu()
         
         # Check if change direction matches target
         actual_change = anon_scores - orig_scores

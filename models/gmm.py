@@ -32,14 +32,22 @@ class SpeakerEmbeddingGMM:
         n_components: int = 32,
         embedding_dim: int = 192,
         covariance_type: str = "diag",  # 'diag' (recommended), 'full', 'tied', 'spherical'
-        max_iter: int = 200,
+        max_iter: int = 1000,
         random_state: int = 42,
-        verbose: int = 0,
+        verbose: int = 1,
+        n_init=5,               # more restarts
+        tol=1e-4,               # slightly looser or keep default
+        reg_covar=1e-6,         # prevents degenerate covariances
+        init_params="kmeans",
     ):
         self.gmm = GaussianMixture(
             n_components=n_components,
             covariance_type=covariance_type,
             max_iter=max_iter,
+            n_init=n_init,
+            tol=tol,
+            reg_covar=reg_covar,
+            init_params=init_params,
             random_state=random_state,
             verbose=verbose,
         )

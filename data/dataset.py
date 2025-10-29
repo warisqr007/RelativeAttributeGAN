@@ -176,14 +176,14 @@ class GANTrainingDataset(Dataset):
         
         # Sample random attribute deltas
         deltas = torch.FloatTensor(len(self.attributes)).uniform_(
-            self.delta_range,
-            self.delta_range
+            self.delta_range[0],
+            self.delta_range[1]
         )
         
         # Sample random anonymization level
         lambda_anon = torch.FloatTensor(1).uniform_(
-            self.lambda_range,
-            self.lambda_range
+            self.lambda_range[0],
+            self.lambda_range[1]
         )
         
         return {

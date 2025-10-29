@@ -70,6 +70,13 @@ def main():
     )
 
     parser.add_argument(
+        '--world_size',
+        type=int,
+        default=1,
+        help='Number of parallel processes used during age extraction'
+    )
+
+    parser.add_argument(
         '--gender_metadata_csv',
         type=str,
         required=True,
@@ -86,19 +93,28 @@ def main():
     args = parser.parse_args()
     
     # Load
-    age_metadata    = pd.read_csv(args.age_metadata_csv)
-    gender_metadata = pd.read_csv(args.gender_metadata_csv, sep="\t")  # or delimiter="\t"
+    if args.world_size > 1:
+        # If multiple processes were used, combine their CSVs
+        age_metadata_parts = []
+        for rank in range(args.world_size):
+            part_csv = args.age_metadata_csv.replace('.csv', f'_rank{rank}.csv')
+            part_df = pd.read_csv(part_csv)
+            age_metadata_parts.append(part_df)
+        age_metadata = pd.concat(age_metadata_parts, ignore_index=True)
+    else:
+        age_metadata    = pd.read_csv(args.age_metadata_csv)
+    gender_metadata = pd.read_csv(args.gender_metadata_csv)  # or delimiter="\t"
 
     # --- Normalize join keys ---
     age_metadata['speaker_id'] = age_metadata['speaker_id'].astype(str).str.strip()
-    gender_metadata['VoxCeleb1 ID'] = gender_metadata['VoxCeleb1 ID'].astype(str).str.strip()
+    gender_metadata['VoxCeleb2 ID'] = gender_metadata['VoxCeleb2 ID'].astype(str).str.strip()
 
     # --- Ensure speaker-level uniqueness (safety) ---
     # If gender_metadata might have multiple rows per speaker, keep first (or choose a rule)
     gender_metadata = (
         gender_metadata
-        .drop_duplicates(subset=['VoxCeleb1 ID'])
-        .rename(columns={'VoxCeleb1 ID': 'speaker_id'})
+        .drop_duplicates(subset=['VoxCeleb2 ID'])
+        .rename(columns={'VoxCeleb2 ID': 'speaker_id'})
     )
 
     # --- Merge: utterance-level (left) × speaker-level (many-to-one) ---
@@ -122,13 +138,16 @@ def main():
 
     # Prepare F0 file paths -> replace /{audio_dirname}/ with /{f0_dirname}/ and .wav with .f0.npy
     # ../wav/../../file.wav  ->  ../f0/../../file.f0.npy
+    audio_ext = ".wav"
+    if args.audio_dirname == "aac":
+        audio_ext = ".m4a"
     f0_fpaths = [
-        fpath.replace(f"/{args.audio_dirname}/", f"/{args.f0_dirname}/").replace('.wav', '.f0.npy')
+        fpath.replace(f"/{args.audio_dirname}/", f"/{args.f0_dirname}/").replace(audio_ext, '.f0.npy')
         for fpath in wav_fpaths
     ]
 
     embedding_fpaths = [
-        fpath.replace(f"/{args.audio_dirname}/", f"/{args.spkr_embed_dirname}/").replace('.wav', '.npy')
+        fpath.replace(f"/{args.audio_dirname}/", f"/{args.spkr_embed_dirname}/").replace(audio_ext, '.npy')
         for fpath in wav_fpaths
     ]
 
@@ -148,7 +167,7 @@ def main():
         'embedding_path': embedding_fpaths,
         'age': utterance_level['predicted_age'],
         'pitch': mean_f0s,
-        'gender': utterance_level['Gender'].map({'m': 0.0, 'f': 1.0}),  # map to numeric
+        'gender': utterance_level['Gender'].astype(str).str.strip().map({'m': 0.0, 'f': 1.0}),  # map to numeric
         'voice_quality': utterance_level['hnr'],
         'set': utterance_level['Set'],
     })

@@ -1,6 +1,7 @@
 """
 Main training script orchestrating all phases
 """
+import os
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
@@ -77,7 +78,7 @@ def train_attribute_rankers(args):
         
         # Callbacks
         checkpoint = ModelCheckpoint(
-            dirpath=f'checkpoints/rankers/{attribute}',
+            dirpath=f'{args.checkpoint_dir}/rankers/{attribute}',
             filename='best',
             monitor=f'val_loss',
             mode='min',
@@ -127,7 +128,9 @@ def train_gmm(args):
     
     gmm = SpeakerEmbeddingGMM(n_components=64, embedding_dim=train_embeddings.size(1), covariance_type="diag")
     gmm.fit(train_embeddings)
-    gmm.save("checkpoints/gmm/gmm_params.ckpt")
+
+    os.makedirs(f"{args.checkpoint_dir}/gmm", exist_ok=True)
+    gmm.save(f"{args.checkpoint_dir}/gmm/gmm_params.ckpt")
     
     print("\n✓ Phase 2 Complete: GMM training finished")
 
@@ -181,13 +184,13 @@ def train_gan(args):
         lambda_dist=args.lambda_dist,
         lambda_smooth=args.lambda_smooth,
         lambda_ranker=args.lambda_ranker,  # NEW
-        ranker_checkpoint_dir='checkpoints/rankers',  # NEW: Load pretrained rankers
-        gmm_checkpoint_path='checkpoints/gmm/gmm_params.ckpt'  # NEW: GMM path
+        ranker_checkpoint_dir=f'{args.checkpoint_dir}/rankers',  # NEW: Load pretrained rankers
+        gmm_checkpoint_path=f'{args.checkpoint_dir}/gmm/gmm_params.ckpt'  # NEW: GMM path
     )
     
     # Callbacks
     checkpoint = ModelCheckpoint(
-        dirpath='checkpoints/gan',
+        dirpath=f'{args.checkpoint_dir}/gan',
         filename='epoch_{epoch:03d}',
         monitor='g_loss_total',
         mode='min',
@@ -203,7 +206,7 @@ def train_gan(args):
         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
         devices=1,
         logger=WandbLogger(project='speaker-gan', name='relative_attr_gan'),
-        gradient_clip_val=1.0,
+        # gradient_clip_val=1.0,
         log_every_n_steps=10,
         val_check_interval=0.25
     )
@@ -219,18 +222,21 @@ def evaluate(args):
     print("\n" + "="*60)
     print("PHASE 4: Evaluation")
     print("="*60)
+
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     # Load trained models
-    gan = RelativeAttributeGAN.load_from_checkpoint(args.gan_checkpoint)
+    gan = RelativeAttributeGAN.load_from_checkpoint(args.gan_checkpoint, map_location=device)
     gan.eval()
-    
+
+
     # Load attribute rankers
     rankers = MultiAttributeRanker(
         embedding_dim=args.embedding_dim,
         attributes=args.attributes
     )
     for attr in args.attributes:
-        ranker_ckpt = torch.load(f'checkpoints/rankers/{attr}/best.ckpt')
+        ranker_ckpt = torch.load(f'{args.checkpoint_dir}/rankers/{attr}/best.ckpt', map_location='cpu')
         # Extract ranker state dict from Lightning checkpoint
         state_dict = {}
         for key, value in ranker_ckpt['state_dict'].items():
@@ -238,6 +244,9 @@ def evaluate(args):
                 new_key = key.replace(f'ranker.{attr}.', '')
                 state_dict[new_key] = value
         rankers.rankers[attr].load_state_dict(state_dict, strict=False)
+
+    rankers = rankers.to(device)
+    rankers.eval()
     
     # Load speaker encoder (optional but useful for analysis)
     encoder = None
@@ -254,6 +263,8 @@ def evaluate(args):
         emb_tensor = torch.from_numpy(emb)
         test_embeddings.append(emb_tensor)
     test_embeddings = torch.stack(test_embeddings)
+
+    test_embeddings = test_embeddings.to(device)
     
     # Create evaluator
     evaluator = GANEvaluator(
@@ -314,7 +325,8 @@ def main():
     # parser.add_argument('--test_embeddings_path', type=str)
     parser.add_argument('--test_metadata_path', type=str, default='/data/waris/data/Voxceleb/voxceleb1/final_metadata_test.csv')
     # parser.add_argument('--encoder_path', type=str, help='Pretrained speaker encoder')
-    
+    parser.add_argument('--checkpoint_dir', type=str, default="checkpoints")
+
     # Data
     parser.add_argument('--embedding_dim', type=int, default=704)
     parser.add_argument('--attributes', nargs='+',
@@ -337,6 +349,7 @@ def main():
     parser.add_argument('--lambda_attr', type=float, default=1.0)
     parser.add_argument('--lambda_dist', type=float, default=1.0)
     parser.add_argument('--lambda_smooth', type=float, default=0.1)
+    parser.add_argument('--lambda_ranker', type=float, default=0.5)
     
     # Evaluation
     parser.add_argument('--gan_checkpoint', type=str)
@@ -355,7 +368,7 @@ def main():
     
     if args.mode in ['eval', 'all']:
         if not args.gan_checkpoint:
-            args.gan_checkpoint = 'checkpoints/gan/last.ckpt'
+            args.gan_checkpoint = f'{args.checkpoint_dir}/gan/last.ckpt'
         evaluate(args)
 
 

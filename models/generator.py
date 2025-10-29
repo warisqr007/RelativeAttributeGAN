@@ -87,7 +87,7 @@ class AttributeControlGenerator(nn.Module):
             lambda_anon = lambda_anon.unsqueeze(1)
         
         # Concatenate all inputs
-        x = torch.cat([embeddings, attribute_deltas, lambda_anon], dim=1)
+        x = torch.cat([embeddings, attribute_deltas, lambda_anon], dim=1) ##TODO: tile instead of concat?
         
         # Transform through network
         x = self.input_proj(x)
@@ -96,7 +96,7 @@ class AttributeControlGenerator(nn.Module):
             x = block(x)
         
         # Project to embedding space
-        delta = self.output_proj(x)
+        delta = self.output_proj(x) #TODO: Include composite attribute change directions?
         
         # Residual connection: e' = e + alpha * delta
         # The residual weight learns how much to change

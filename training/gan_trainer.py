@@ -63,7 +63,7 @@ class RelativeAttributeGAN(pl.LightningModule):
             self._load_rankers(ranker_checkpoint_dir, attributes)
 
         
-        self.gmm_prior = GMMNLLPrior(embedding_dim=embedding_dim, num_components=gmm_num_components)
+        self.gmm_prior = GMMNLLPrior(emb_dim=embedding_dim, num_components=gmm_num_components)
         if gmm_checkpoint_path:
             self._load_gmm(gmm_checkpoint_path)
         
@@ -187,7 +187,7 @@ class RelativeAttributeGAN(pl.LightningModule):
         
         # Unpack batch
         real_embeddings = batch['embedding']
-        batch_size = real_embeddings.shape
+        batch_size = real_embeddings.shape[0]
         
         # Sample attribute deltas and anonymization levels from curriculum range
         delta_range = phase_config['delta_range']
@@ -195,11 +195,11 @@ class RelativeAttributeGAN(pl.LightningModule):
         
         attribute_deltas = torch.FloatTensor(
             batch_size, self.hparams.num_attributes
-        ).uniform_(delta_range, delta_range).to(self.device)
+        ).uniform_(delta_range[0], delta_range[1]).to(self.device)
         
         lambda_anon = torch.FloatTensor(
             batch_size, 1
-        ).uniform_(lambda_range, lambda_range).to(self.device)
+        ).uniform_(lambda_range[0], lambda_range[1]).to(self.device)
         
         ##########################
         # (1) Update Discriminator
@@ -289,7 +289,7 @@ class RelativeAttributeGAN(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         """Validate generator quality"""
         real_embeddings = batch['embedding']
-        batch_size = real_embeddings.shape
+        batch_size = real_embeddings.shape[0]
         
         # Fixed test transformations
         attribute_deltas = torch.zeros(

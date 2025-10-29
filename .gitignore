@@ -181,4 +181,5 @@ logs/*
 dummy*
 results*
 checkpoints/*
+checkpointsv2/*
 wandb/*

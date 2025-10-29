@@ -58,7 +58,8 @@ class GANEvaluator:
         results = {}
         device = next(self.generator.parameters()).device
         test_embeddings = test_embeddings.to(device)
-        speaker_ids = torch.tensor(test_metadata['speaker_id'].values)
+        speaker_ids = [int(sid[2:]) for sid in test_metadata['speaker_id'].values]
+        speaker_ids = torch.tensor(speaker_ids)
         
         # 1. CORRECTED: Anonymization effectiveness (EER)
         print("\n1. Evaluating Anonymization Effectiveness...")
@@ -75,6 +76,8 @@ class GANEvaluator:
         results['linkability'] = {}
         
         for lambda_val in lambda_values:
+            print(f"  Evaluating λ_anon = {lambda_val:.1f}...")
+
             N = len(test_embeddings)
             lambda_tensor = torch.FloatTensor(N, 1).fill_(lambda_val).to(device)
             zero_deltas = torch.zeros(N, self.generator.num_attributes).to(device)
@@ -100,6 +103,7 @@ class GANEvaluator:
         # 3. Ranking accuracy preservation
         print("\n3. Evaluating Ranking Accuracy...")
         for attr in self.rankers.attributes:
+            print(f"  Evaluating attribute: {attr}...")
             if attr in test_metadata.columns:
                 results[f'ranking_acc_{attr}'] = compute_ranking_accuracy(
                     self.rankers.rankers[attr],
@@ -129,6 +133,7 @@ class GANEvaluator:
             # Test at different lambda values
             quality_scores = {}
             for lambda_val in [0.3, 0.5, 0.7]:
+                print(f"  Evaluating λ_anon = {lambda_val:.1f}...")
                 lambda_tensor = torch.FloatTensor(N, 1).fill_(lambda_val).to(device)
                 zero_deltas = torch.zeros(N, self.generator.num_attributes).to(device)
                 
